@@ -214,18 +214,50 @@ class SimpleDiscriminator(nn.Module):
         return self.model(img_input)
 
 
-# 训练函数
-def train(dataloader, gen, disc, g_opt, d_opt, criterion, device, epochs=3):
-    model_dir = "models"
-    os.makedirs(model_dir, exist_ok=True)
+def save_checkpoint(epoch, gen, disc, g_opt, d_opt, path):
+    """保存训练检查点（模型+优化器+epoch）"""
+    torch.save({
+        'epoch': epoch,
+        'gen_state_dict': gen.state_dict(),
+        'disc_state_dict': disc.state_dict(),
+        'g_opt_state_dict': g_opt.state_dict(),
+        'd_opt_state_dict': d_opt.state_dict(),
+    }, path)
+    print(f"检查点已保存: {path}")
+
+
+def load_checkpoint(path, gen, disc, g_opt, d_opt, device):
+    """加载训练检查点"""
+    if not os.path.exists(path):
+        print(f"检查点文件不存在: {path}")
+        return 0
+
+    checkpoint = torch.load(path, map_location=device)
+    gen.load_state_dict(checkpoint['gen_state_dict'])
+    disc.load_state_dict(checkpoint['disc_state_dict'])
+    g_opt.load_state_dict(checkpoint['g_opt_state_dict'])
+    d_opt.load_state_dict(checkpoint['d_opt_state_dict'])
+    epoch = checkpoint['epoch']
+
+    print(f"成功加载检查点: {path}")
+    print(f"从第 {epoch + 1} 轮继续训练")
+    return epoch + 1  # 返回下一轮开始的epoch
+
+
+# 训练函数（支持从检查点恢复）
+def train(dataloader, gen, disc, g_opt, d_opt, criterion, device,
+          total_epochs=10, start_epoch=0, checkpoint_dir="checkpoints", save_interval=1):
+    """训练函数，支持从指定轮数开始"""
+    # 创建检查点目录
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
     # 记录开始时间
     start_time = time.time()
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, total_epochs):
         epoch_start = time.time()
         print(f"\n{'=' * 40}")
-        print(f"开始训练第 {epoch + 1}/{epochs} 轮")
+        print(f"开始训练第 {epoch + 1}/{total_epochs} 轮")
         print(f"{'=' * 40}")
 
         for i, (input_imgs, target_imgs) in enumerate(dataloader):
@@ -262,20 +294,22 @@ def train(dataloader, gen, disc, g_opt, d_opt, criterion, device, epochs=3):
 
             # 每批次打印一次
             batch_time = time.time() - epoch_start
-            print(f"[Epoch {epoch + 1}/{epochs}] [Batch {i + 1}/{len(dataloader)}] "
+            print(f"[Epoch {epoch + 1}/{total_epochs}] [Batch {i + 1}/{len(dataloader)}] "
                   f"[D loss: {d_loss.item():.4f}] [G loss: {g_loss.item():.4f}] "
                   f"[耗时: {batch_time:.1f}s]")
 
-        # 保存模型
-        gen_path = os.path.join(model_dir, f"generator_epoch_{epoch}.pth")
-        disc_path = os.path.join(model_dir, f"discriminator_epoch_{epoch}.pth")
-
-        torch.save(gen.state_dict(), gen_path)
-        torch.save(disc.state_dict(), disc_path)
-        print(f"模型已保存: {gen_path}")
-
         # 保存示例
         save_example(gen, input_imgs, target_imgs, epoch, device)
+
+        # 定期保存检查点
+        if (epoch + 1) % save_interval == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch + 1}.pth")
+            save_checkpoint(epoch + 1, gen, disc, g_opt, d_opt, checkpoint_path)
+
+            # 同时保存单独的生成器模型（用于预测）
+            gen_path = os.path.join(checkpoint_dir, f"generator_epoch_{epoch + 1}.pth")
+            torch.save(gen.state_dict(), gen_path)
+            print(f"生成器模型已保存: {gen_path}")
 
         epoch_time = time.time() - epoch_start
         print(f"\n第 {epoch + 1} 轮完成, 耗时: {epoch_time / 60:.2f}分钟")
@@ -283,6 +317,7 @@ def train(dataloader, gen, disc, g_opt, d_opt, criterion, device, epochs=3):
     total_time = time.time() - start_time
     print(f"\n{'=' * 40}")
     print(f"训练完成! 总耗时: {total_time / 60:.2f}分钟")
+    print(f"训练轮数: {start_epoch} -> {total_epochs}")
     print(f"{'=' * 40}")
 
 
@@ -293,7 +328,7 @@ def save_example(gen, input_imgs, target_imgs, epoch, device):
         fake_imgs = gen(input_imgs[:1])
 
         # 创建保存目录
-        save_dir = os.path.join(result_dir, f"epoch_{epoch}")
+        save_dir = os.path.join(result_dir, f"epoch_{epoch + 1}")
         os.makedirs(save_dir, exist_ok=True)
 
         # 保存输入图像
@@ -319,7 +354,7 @@ def save_example(gen, input_imgs, target_imgs, epoch, device):
     gen.train()
 
 
-# 主训练函数
+# 主训练函数（支持继续训练）
 def main():
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -330,18 +365,28 @@ def main():
     first_dir = "./images/first"
     # 目标图像目录
     end_dir = "./images/end"
-    # 训练轮数
-    epochs = 10
+    # 总训练轮数
+    total_epochs = 15
     # 批次大小
     batch_size = 1
     # 学习率
     lr = 2e-4
+    # 检查点目录
+    checkpoint_dir = "checkpoints"
+    # 保存间隔（每几轮保存一次）
+    save_interval = 3
+
+    # 恢复训练设置
+    resume_training = True  # 是否从检查点恢复训练
+    # 指定要恢复的检查点路径（如果为None，则自动使用最新的检查点）
+    resume_checkpoint = None
     # ============================= #
 
     print("\n" + "=" * 50)
     print(f" 开始图像转换训练")
     print(f" 分辨率: {SIZE[0]}x{SIZE[1]}")
-    print(f" 训练轮数: {epochs}")
+    print(f" 总训练轮数: {total_epochs}")
+    print(f" 恢复训练: {'是' if resume_training else '否'}")
     print("=" * 50 + "\n")
 
     print(f"原始图像目录: {first_dir}")
@@ -386,13 +431,38 @@ def main():
     d_opt = optim.Adam(disc.parameters(), lr=lr, betas=(0.5, 0.999))
     criterion = nn.BCEWithLogitsLoss()
 
-    # 创建模型目录
-    os.makedirs("models", exist_ok=True)
+    # 起始轮数
+    start_epoch = 0
 
-    print(f"\n开始训练，共 {epochs} 个epochs，批次大小 {batch_size}...")
+    # 恢复训练
+    if resume_training:
+        # 自动查找最新的检查点
+        if resume_checkpoint is None:
+            checkpoints = glob.glob(os.path.join(checkpoint_dir, "checkpoint_epoch_*.pth"))
+            if checkpoints:
+                # 按epoch排序
+                checkpoints.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
+                resume_checkpoint = checkpoints[-1]
+
+        if resume_checkpoint:
+            start_epoch = load_checkpoint(resume_checkpoint, gen, disc, g_opt, d_opt, device)
+
+    print(f"\n开始训练，从第 {start_epoch} 轮到第 {total_epochs} 轮...")
 
     # 开始训练
-    train(dataloader, gen, disc, g_opt, d_opt, criterion, device, epochs)
+    train(
+        dataloader=dataloader,
+        gen=gen,
+        disc=disc,
+        g_opt=g_opt,
+        d_opt=d_opt,
+        criterion=criterion,
+        device=device,
+        total_epochs=total_epochs,
+        start_epoch=start_epoch,
+        checkpoint_dir=checkpoint_dir,
+        save_interval=save_interval
+    )
 
     print("\n训练完成! 模型和示例图像已保存")
 
