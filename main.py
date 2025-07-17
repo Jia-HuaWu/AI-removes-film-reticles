@@ -11,416 +11,395 @@ import rawpy
 import numpy as np
 from PIL import Image
 import glob
-import matplotlib.pyplot as plt
+import time
 
-# 全局分辨率变量 - 修改为支持宽高
-WIDTH = 1024
-HEIGHT = 768
-print(f"[初始化] 设置分辨率: {WIDTH}x{HEIGHT}")
+# 全局分辨率变量
+SIZE = (1024, 768)  # (宽度, 高度)
+
+# 创建结果目录
+result_dir = "images/result_epoch"
+os.makedirs(result_dir, exist_ok=True)
 
 
-# 2. 数据准备与映射函数
+# 数据准备与映射函数
 def create_file_mapping(first_dir, end_dir):
-    print(f"[文件映射] 开始创建文件映射: {first_dir} -> {end_dir}")
-    mapping = {}
-    first_files = sorted(glob.glob(os.path.join(first_dir, "*.nef")))
-    end_files = sorted(glob.glob(os.path.join(end_dir, "*.jpg")))
-    print(f"[文件映射] 找到 {len(first_files)} 个NEF文件, {len(end_files)} 个JPG文件")
+    print(f"正在扫描目录: {first_dir} 和 {end_dir}")
 
+    # 获取所有.nef文件 (不区分大小写)
+    first_files = []
+    for ext in ['.nef', '.NEF']:
+        first_files.extend(glob.glob(os.path.join(first_dir, f"*{ext}")))
+
+    # 获取所有.jpg文件 (不区分大小写)
+    end_files = []
+    for ext in ['.jpg', '.jpeg', '.JPG', '.JPEG']:
+        end_files.extend(glob.glob(os.path.join(end_dir, f"*{ext}")))
+
+    print(f"找到 {len(first_files)} 个原始图像文件")
+    print(f"找到 {len(end_files)} 个目标图像文件")
+
+    # 创建映射字典
+    mapping = {}
+
+    # 根据文件名中的数字序号建立映射
     for f in first_files:
         base = os.path.basename(f)
-        num = int(base.split('_')[1].split('.')[0])
-        target_num = 100030 + (num - 5171)
-        target_path = os.path.join(end_dir, f"{target_num}.jpg")
-        if os.path.exists(target_path):
-            mapping[f] = target_path
-            print(f"[文件映射] 匹配: {os.path.basename(f)} -> {os.path.basename(target_path)}")
+        # 尝试多种可能的文件名格式
+        if 'DSC_' in base:
+            # 格式: DSC_5171.nef
+            try:
+                num_part = base.split('_')[1].split('.')[0]
+                num = int(num_part)
+            except (IndexError, ValueError):
+                print(f"警告: 无法从文件名 '{base}' 中提取数字, 跳过")
+                continue
+        elif 'DSC' in base:
+            # 格式: DSC5171.nef
+            try:
+                num_part = base.replace('DSC', '').split('.')[0]
+                num = int(num_part)
+            except ValueError:
+                print(f"警告: 无法从文件名 '{base}' 中提取数字, 跳过")
+                continue
         else:
-            print(f"[警告] 找不到匹配文件: {os.path.basename(f)} 的目标 {target_path}")
+            # 尝试从文件名中提取任何数字
+            try:
+                num_part = ''.join(filter(str.isdigit, base.split('.')[0]))
+                num = int(num_part)
+            except ValueError:
+                print(f"警告: 无法从文件名 '{base}' 中提取数字, 跳过")
+                continue
 
-    print(f"[文件映射] 完成! 共找到 {len(mapping)} 对有效图像")
+        # 计算目标文件名
+        target_num = 100030 + (num - 5171)
+
+        # 尝试多种可能的扩展名
+        target_found = False
+        for ext in ['.jpg', '.jpeg', '.JPG', '.JPEG']:
+            target_path = os.path.join(end_dir, f"{target_num}{ext}")
+            if os.path.exists(target_path):
+                mapping[f] = target_path
+                target_found = True
+                break
+
+        if not target_found:
+            print(f"警告: 未找到文件 {base} 的目标图像 ({target_num}.jpg)")
+
+    print(f"成功创建 {len(mapping)} 对图像映射")
     return mapping
 
 
-# 3. 自定义数据集类
+# 自定义数据集类
 class NEFtoJPGDataset(Dataset):
     def __init__(self, mapping, transform=None):
+        super().__init__()
         self.mapping = mapping
         self.file_pairs = list(mapping.items())
         self.transform = transform
-        print(f"[数据集] 初始化数据集, 共有 {len(self.file_pairs)} 对图像")
 
-    def __len__(self):
-        return len(self.file_pairs)
+        # 打印一些样本以验证
+        print("\n数据集样本:")
+        for i, (nef, jpg) in enumerate(self.file_pairs[:min(3, len(self.file_pairs))]):
+            print(f"  {i + 1}. {os.path.basename(nef)} -> {os.path.basename(jpg)}")
+        if len(self.file_pairs) > 3:
+            print(f"  还有 {len(self.file_pairs) - 3} 对图像...")
 
     def __getitem__(self, idx):
         nef_path, jpg_path = self.file_pairs[idx]
-        print(f"[数据集] 加载图像对 #{idx}: {os.path.basename(nef_path)} -> {os.path.basename(jpg_path)}")
 
         try:
             with rawpy.imread(nef_path) as raw:
                 rgb = raw.postprocess()
-            input_img = Image.fromarray(rgb)
-            print(f"[数据集] 成功加载NEF: {os.path.basename(nef_path)}, 尺寸: {input_img.size}")
+            input_img = Image.fromarray(rgb).resize(SIZE)
         except Exception as e:
-            print(f"[错误] 处理NEF失败 {nef_path}: {e}")
-            input_img = Image.new('RGB', (WIDTH, HEIGHT), (0, 0, 0))
+            print(f"错误处理 {nef_path}: {e}")
+            input_img = Image.new('RGB', SIZE, (0, 0, 0))
 
         try:
-            target_img = Image.open(jpg_path).convert('RGB')
-            print(f"[数据集] 成功加载JPG: {os.path.basename(jpg_path)}, 尺寸: {target_img.size}")
+            target_img = Image.open(jpg_path).convert('RGB').resize(SIZE)
         except Exception as e:
-            print(f"[错误] 处理JPG失败 {jpg_path}: {e}")
-            target_img = Image.new('RGB', (WIDTH, HEIGHT), (0, 0, 0))
+            print(f"错误处理 {jpg_path}: {e}")
+            target_img = Image.new('RGB', SIZE, (0, 0, 0))
 
         if self.transform:
-            print(f"[数据集] 应用变换...")
             input_img = self.transform(input_img)
             target_img = self.transform(target_img)
-            print(f"[数据集] 变换后尺寸: 输入={input_img.shape}, 目标={target_img.shape}")
 
         return input_img, target_img
 
+    def __len__(self):
+        return len(self.file_pairs)
 
-# 4. 定义生成器 (U-Net架构) - 支持自定义分辨率
-class UNetGenerator(nn.Module):
+
+# 简化版生成器
+class SimpleGenerator(nn.Module):
     def __init__(self, in_channels=3, out_channels=3):
         super().__init__()
-        print(f"[生成器] 初始化U-Net生成器, 输入通道={in_channels}, 输出通道={out_channels}")
-        print(f"[生成器] 目标分辨率: {WIDTH}x{HEIGHT}")
-
-        def down_block(in_ch, out_ch, normalize=True):
-            layers = [nn.Conv2d(in_ch, out_ch, 4, 2, 1, bias=False)]
-            if normalize:
-                layers.append(nn.InstanceNorm2d(out_ch))
-            layers.append(nn.LeakyReLU(0.2))
-            return layers
-
-        def up_block(in_ch, out_ch, dropout=False):
-            layers = [
-                nn.ConvTranspose2d(in_ch, out_ch, 4, 2, 1, bias=False),
-                nn.InstanceNorm2d(out_ch),
-                nn.ReLU(inplace=True)
-            ]
-            if dropout:
-                layers.append(nn.Dropout(0.5))
-            return layers
-
-        # 基础结构
-        self.down1 = nn.Sequential(*down_block(in_channels, 64, normalize=False))
-        self.down2 = nn.Sequential(*down_block(64, 128))
-        self.down3 = nn.Sequential(*down_block(128, 256))
-        self.down4 = nn.Sequential(*down_block(256, 512))
-        print(f"[生成器] 添加基础下采样块: d1-d4")
-
-        # 对于高分辨率图像，添加更多层
-        max_dim = max(WIDTH, HEIGHT)
-        if max_dim > 512:
-            print(f"[生成器] 添加高分辨率扩展 (max_dim={max_dim}>512)")
-            self.down5 = nn.Sequential(*down_block(512, 512))
-            self.down6 = nn.Sequential(*down_block(512, 512))
-            self.up0 = nn.Sequential(*up_block(512, 512, dropout=True))
-            self.up1 = nn.Sequential(*up_block(1024, 512, dropout=True))
-            self.up2 = nn.Sequential(*up_block(1024, 256))
-            self.up3 = nn.Sequential(*up_block(512, 128))
-            self.up4 = nn.Sequential(*up_block(256, 64))
-            self.final = nn.Sequential(
-                nn.ConvTranspose2d(128, out_channels, 4, 2, 1),
-                nn.Tanh()
-            )
-            print(f"[生成器] 添加额外下采样和上采样块: d5-d6, u0-u4")
-        else:
-            print(f"[生成器] 使用标准分辨率结构 (max_dim={max_dim}<=512)")
-            self.up1 = nn.Sequential(*up_block(512, 256, dropout=True))
-            self.up2 = nn.Sequential(*up_block(512, 128))
-            self.up3 = nn.Sequential(*up_block(256, 64))
-            self.final = nn.Sequential(
-                nn.ConvTranspose2d(128, out_channels, 4, 2, 1),
-                nn.Tanh()
-            )
-
-        print(f"[生成器] 初始化完成")
-
-    def forward(self, x):
-        print(f"[生成器] 前向传播, 输入尺寸: {x.shape}")
 
         # 下采样
+        self.down1 = nn.Sequential(
+            nn.Conv2d(in_channels, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2)
+        )
+
+        self.down2 = nn.Sequential(
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2)
+        )
+
+        # 中间层
+        self.mid = nn.Sequential(
+            nn.Conv2d(64, 128, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 128, 3, padding=1),
+            nn.ReLU()
+        )
+
+        # 上采样
+        self.up1 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Conv2d(128, 64, 3, padding=1),
+            nn.ReLU()
+        )
+
+        self.up2 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Conv2d(64, 32, 3, padding=1),
+            nn.ReLU()
+        )
+
+        # 输出层
+        self.out = nn.Sequential(
+            nn.Conv2d(32, out_channels, 3, padding=1),
+            nn.Tanh()
+        )
+
+    def forward(self, x):
         d1 = self.down1(x)
         d2 = self.down2(d1)
-        d3 = self.down3(d2)
-        d4 = self.down4(d3)
-        print(f"[生成器] 下采样后: d1={d1.shape}, d2={d2.shape}, d3={d3.shape}, d4={d4.shape}")
-
-        # 高分辨率处理
-        max_dim = max(WIDTH, HEIGHT)
-        if max_dim > 512:
-            d5 = self.down5(d4)
-            d6 = self.down6(d5)
-            print(f"[生成器] 额外下采样: d5={d5.shape}, d6={d6.shape}")
-
-            u0 = self.up0(d6)
-            print(f"[生成器] 上采样 u0: {u0.shape}")
-
-            u1 = self.up1(torch.cat([u0, d5], 1))
-            print(f"[生成器] 上采样 u1 (拼接u0+d5): {u1.shape}")
-
-            u2 = self.up2(torch.cat([u1, d4], 1))
-            print(f"[生成器] 上采样 u2 (拼接u1+d4): {u2.shape}")
-
-            u3 = self.up3(torch.cat([u2, d3], 1))
-            print(f"[生成器] 上采样 u3 (拼接u2+d3): {u3.shape}")
-
-            u4 = self.up4(torch.cat([u3, d2], 1))
-            print(f"[生成器] 上采样 u4 (拼接u3+d2): {u4.shape}")
-
-            u5 = self.final(torch.cat([u4, d1], 1))
-            print(f"[生成器] 最终输出: {u5.shape}")
-            return u5
-        else:
-            u1 = self.up1(d4)
-            u2 = self.up2(torch.cat([u1, d3], 1))
-            u3 = self.up3(torch.cat([u2, d2], 1))
-            u4 = self.final(torch.cat([u3, d1], 1))
-            print(f"[生成器] 上采样路径: u1={u1.shape}, u2={u2.shape}, u3={u3.shape}, 输出={u4.shape}")
-            return u4
+        m = self.mid(d2)
+        u1 = self.up1(m)
+        u2 = self.up2(u1)
+        return self.out(u2)
 
 
-# 5. 定义判别器 (PatchGAN) - 支持不同分辨率
-class Discriminator(nn.Module):
-    def __init__(self, in_channels=3):
+# 简化版判别器
+class SimpleDiscriminator(nn.Module):
+    def __init__(self, in_channels=6):
         super().__init__()
-        print(f"[判别器] 初始化PatchGAN判别器, 输入通道={in_channels}")
-        print(f"[判别器] 目标分辨率: {WIDTH}x{HEIGHT}")
 
-        def block(in_ch, out_ch, normalize=True):
-            layers = [nn.Conv2d(in_ch, out_ch, 4, 2, 1)]
-            if normalize:
-                layers.append(nn.InstanceNorm2d(out_ch))
-            layers.append(nn.LeakyReLU(0.2))
-            return layers
+        self.model = nn.Sequential(
+            nn.Conv2d(in_channels, 32, 4, stride=2, padding=1),
+            nn.LeakyReLU(0.2),
 
-        # 基础结构
-        layers = [
-            *block(in_channels * 2, 64, normalize=False),
-            *block(64, 128),
-            *block(128, 256),
-            *block(256, 512),
-        ]
-        print(f"[判别器] 添加基础块: 4层")
+            nn.Conv2d(32, 64, 4, stride=2, padding=1),
+            nn.InstanceNorm2d(64),
+            nn.LeakyReLU(0.2),
 
-        # 对于高分辨率图像，添加更多层
-        max_dim = max(WIDTH, HEIGHT)
-        if max_dim > 512:
-            print(f"[判别器] 添加高分辨率扩展 (max_dim={max_dim}>512)")
-            layers.extend([
-                *block(512, 512),
-                *block(512, 512),
-            ])
-            print(f"[判别器] 添加额外2层")
+            nn.Conv2d(64, 128, 4, stride=2, padding=1),
+            nn.InstanceNorm2d(128),
+            nn.LeakyReLU(0.2),
 
-        # 最终层
-        layers.extend([
-            nn.ZeroPad2d((1, 0, 1, 0)),
-            nn.Conv2d(512, 1, 4, padding=1)
-        ])
-        print(f"[判别器] 添加最终层")
-
-        self.model = nn.Sequential(*layers)
-        print(f"[判别器] 初始化完成")
+            nn.Conv2d(128, 1, 4, padding=1)
+        )
 
     def forward(self, img_A, img_B):
-        print(f"[判别器] 前向传播, 输入A: {img_A.shape}, 输入B: {img_B.shape}")
         img_input = torch.cat([img_A, img_B], 1)
-        print(f"[判别器] 拼接后输入: {img_input.shape}")
-        output = self.model(img_input)
-        print(f"[判别器] 输出: {output.shape}")
-        return output
+        return self.model(img_input)
 
 
-# 6. 训练函数
-def train(dataloader, gen, disc, g_opt, d_opt, criterion, device, epochs=100):
-    print(f"[训练] 开始训练, 共 {epochs} 个epochs")
+# 训练函数
+def train(dataloader, gen, disc, g_opt, d_opt, criterion, device, epochs=3):
     model_dir = "models"
     os.makedirs(model_dir, exist_ok=True)
-    print(f"[训练] 模型保存目录: {model_dir}")
 
-    # 根据分辨率调整打印频率
-    max_dim = max(WIDTH, HEIGHT)
-    print_freq = 10 if max_dim <= 512 else 5
-    print(f"[训练] 日志打印频率: 每 {print_freq} 个batch")
+    # 记录开始时间
+    start_time = time.time()
 
     for epoch in range(epochs):
-        print(f"\n[训练] === Epoch {epoch + 1}/{epochs} ===")
+        epoch_start = time.time()
+        print(f"\n{'=' * 40}")
+        print(f"开始训练第 {epoch + 1}/{epochs} 轮")
+        print(f"{'=' * 40}")
 
         for i, (input_imgs, target_imgs) in enumerate(dataloader):
-            print(f"\n[训练] Batch {i + 1}/{len(dataloader)}")
-
-            real_A = input_imgs.to(device)
-            real_B = target_imgs.to(device)
-            print(f"[训练] 加载到设备: 输入={real_A.shape}, 目标={real_B.shape}")
+            input_imgs = input_imgs.to(device)
+            target_imgs = target_imgs.to(device)
 
             # 训练判别器
-            print(f"[训练] 训练判别器...")
             d_opt.zero_grad()
 
             # 真实图像
-            pred_real = disc(real_A, real_B)
+            pred_real = disc(input_imgs, target_imgs)
             loss_real = criterion(pred_real, torch.ones_like(pred_real))
-            print(f"[训练] 判别器真实损失: {loss_real.item():.4f}")
 
             # 生成图像
-            with torch.no_grad():
-                fake_B = gen(real_A)
-                print(f"[训练] 生成图像: {fake_B.shape}")
-
-            pred_fake = disc(real_A, fake_B.detach())
+            fake_B = gen(input_imgs)
+            pred_fake = disc(input_imgs, fake_B.detach())
             loss_fake = criterion(pred_fake, torch.zeros_like(pred_fake))
-            print(f"[训练] 判别器生成损失: {loss_fake.item():.4f}")
 
             d_loss = (loss_real + loss_fake) * 0.5
             d_loss.backward()
             d_opt.step()
-            print(f"[训练] 判别器总损失: {d_loss.item():.4f}, 已更新权重")
 
             # 训练生成器
-            print(f"[训练] 训练生成器...")
             g_opt.zero_grad()
 
-            pred_fake = disc(real_A, fake_B)
+            pred_fake = disc(input_imgs, fake_B)
             g_adv_loss = criterion(pred_fake, torch.ones_like(pred_fake))
-            print(f"[训练] 生成器对抗损失: {g_adv_loss.item():.4f}")
 
-            g_l1_loss = torch.nn.L1Loss()(fake_B, real_B) * 100
-            print(f"[训练] 生成器L1损失: {g_l1_loss.item():.4f}")
+            g_l1_loss = torch.nn.functional.l1_loss(fake_B, target_imgs) * 100
 
             g_loss = g_adv_loss + g_l1_loss
             g_loss.backward()
             g_opt.step()
-            print(f"[训练] 生成器总损失: {g_loss.item():.4f}, 已更新权重")
 
-            # 使用全局变量控制打印频率
-            if i % print_freq == 0:
-                print(f"[训练] [Epoch {epoch + 1}/{epochs}] [Batch {i}/{len(dataloader)}] "
-                      f"[D loss: {d_loss.item():.4f}] [G loss: {g_loss.item():.4f}]")
+            # 每批次打印一次
+            batch_time = time.time() - epoch_start
+            print(f"[Epoch {epoch + 1}/{epochs}] [Batch {i + 1}/{len(dataloader)}] "
+                  f"[D loss: {d_loss.item():.4f}] [G loss: {g_loss.item():.4f}] "
+                  f"[耗时: {batch_time:.1f}s]")
 
         # 保存模型
-        gen_path = os.path.join(model_dir, f"generator_{WIDTH}x{HEIGHT}_epoch_{epoch}.pth")
-        disc_path = os.path.join(model_dir, f"discriminator_{WIDTH}x{HEIGHT}_epoch_{epoch}.pth")
+        gen_path = os.path.join(model_dir, f"generator_epoch_{epoch}.pth")
+        disc_path = os.path.join(model_dir, f"discriminator_epoch_{epoch}.pth")
 
         torch.save(gen.state_dict(), gen_path)
         torch.save(disc.state_dict(), disc_path)
-        print(f"[训练] 模型已保存: {gen_path}")
+        print(f"模型已保存: {gen_path}")
 
         # 保存示例
-        save_example(gen, real_A, real_B, epoch)
+        save_example(gen, input_imgs, target_imgs, epoch, device)
+
+        epoch_time = time.time() - epoch_start
+        print(f"\n第 {epoch + 1} 轮完成, 耗时: {epoch_time / 60:.2f}分钟")
+
+    total_time = time.time() - start_time
+    print(f"\n{'=' * 40}")
+    print(f"训练完成! 总耗时: {total_time / 60:.2f}分钟")
+    print(f"{'=' * 40}")
 
 
-def save_example(gen, input_imgs, target_imgs, epoch, max_examples=1):
-    print(f"[示例] 保存示例图像, epoch={epoch}")
+def save_example(gen, input_imgs, target_imgs, epoch, device):
     gen.eval()
     with torch.no_grad():
-        batch_size = input_imgs.size(0)
-        num_examples = min(batch_size, max_examples)
-        print(f"[示例] 选择 {num_examples} 个示例")
+        # 只处理第一个样本
+        fake_imgs = gen(input_imgs[:1])
 
-        fake_imgs = gen(input_imgs[:num_examples])
-        print(f"[示例] 生成图像完成, 尺寸: {fake_imgs.shape}")
+        # 创建保存目录
+        save_dir = os.path.join(result_dir, f"epoch_{epoch}")
+        os.makedirs(save_dir, exist_ok=True)
 
-        display_list = [input_imgs[:num_examples], fake_imgs, target_imgs[:num_examples]]
-        titles = ['Input', 'Generated', 'Target']
+        # 保存输入图像
+        input_img = input_imgs[0].cpu().numpy().transpose(1, 2, 0)
+        input_img = (input_img * 0.5 + 0.5) * 255
+        input_img = np.clip(input_img, 0, 255).astype(np.uint8)
+        Image.fromarray(input_img).save(os.path.join(save_dir, "input.jpg"))
 
-        # 根据分辨率调整图像大小
-        figsize = (15, 5 * num_examples) if max(WIDTH, HEIGHT) <= 512 else (20, 7 * num_examples)
-        fig, axes = plt.subplots(num_examples, 3, figsize=figsize)
-        print(f"[示例] 创建图像网格: {num_examples}x3, 尺寸={figsize}")
+        # 保存生成图像
+        fake_img = fake_imgs[0].cpu().numpy().transpose(1, 2, 0)
+        fake_img = (fake_img * 0.5 + 0.5) * 255
+        fake_img = np.clip(fake_img, 0, 255).astype(np.uint8)
+        Image.fromarray(fake_img).save(os.path.join(save_dir, "generated.jpg"))
 
-        if num_examples == 1:
-            axes = axes[np.newaxis, :]
+        # 保存目标图像
+        target_img = target_imgs[0].cpu().numpy().transpose(1, 2, 0)
+        target_img = (target_img * 0.5 + 0.5) * 255
+        target_img = np.clip(target_img, 0, 255).astype(np.uint8)
+        Image.fromarray(target_img).save(os.path.join(save_dir, "target.jpg"))
 
-        for i in range(num_examples):
-            for j in range(3):
-                ax = axes[i, j]
-                img = display_list[j][i].cpu().permute(1, 2, 0).numpy()
-                img = (img * 0.5 + 0.5)
-                img = np.clip(img, 0, 1)
-                ax.imshow(img)
-                ax.set_title(f"{titles[j]} - {WIDTH}x{HEIGHT}")
-                ax.axis('off')
+        print(f"示例图像保存到: {save_dir}")
 
-        plt.tight_layout()
-        save_path = f"results_{WIDTH}x{HEIGHT}_epoch_{epoch}.png"
-        plt.savefig(save_path)
-        plt.close()
-        print(f"[示例] 示例图像已保存: {save_path}")
     gen.train()
 
 
-# 主函数
+# 主训练函数
 def main():
+    # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[主函数] 使用设备: {device}")
-    print(f"[主函数] 目标分辨率: {WIDTH}x{HEIGHT}")
+    print(f"\n使用设备: {device}")
 
-    # 根据分辨率调整批次大小
-    max_dim = max(WIDTH, HEIGHT)
-    if max_dim <= 256:
-        batch_size = 4
-    elif max_dim <= 512:
-        batch_size = 2
-    else:  # 高分辨率
-        batch_size = 1
-    print(f"[主函数] 批次大小: {batch_size} (基于最大维度 {max_dim})")
-
-    lr = 2e-4
-    epochs = 10
-    print(f"[主函数] 学习率: {lr}, Epochs: {epochs}")
-
+    # ========== 配置参数 ========== #
+    # 原始图像目录
     first_dir = "./images/first"
+    # 目标图像目录
     end_dir = "./images/end"
-    print(f"[主函数] 原始图像目录: {first_dir}")
-    print(f"[主函数] 目标图像目录: {end_dir}")
+    # 训练轮数
+    epochs = 10
+    # 批次大小
+    batch_size = 1
+    # 学习率
+    lr = 2e-4
+    # ============================= #
 
+    print("\n" + "=" * 50)
+    print(f" 开始图像转换训练")
+    print(f" 分辨率: {SIZE[0]}x{SIZE[1]}")
+    print(f" 训练轮数: {epochs}")
+    print("=" * 50 + "\n")
+
+    print(f"原始图像目录: {first_dir}")
+    print(f"目标图像目录: {end_dir}")
+
+    # 创建文件映射
     mapping = create_file_mapping(first_dir, end_dir)
     if not mapping:
-        print("[错误] 没有找到匹配的图像对, 退出程序")
+        print("\n错误: 没有找到匹配的图像对，请检查以下内容:")
+        print("1. 确保目录路径正确")
+        print("2. 确保原始图像是.nef格式")
+        print("3. 确保目标图像是.jpg格式")
+        print("4. 文件命名符合DSC_XXXX模式")
+        print("\n正在退出...")
         return
 
-    # 使用全局分辨率变量
-    transform = transforms.Compose([
-        transforms.Resize((HEIGHT, WIDTH)),  # 高度, 宽度
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-    ])
-    print(f"[主函数] 数据转换: Resize({HEIGHT}, {WIDTH}), ToTensor, Normalize")
+    print(f"\n成功匹配 {len(mapping)} 对训练图像")
 
+    # 数据预处理
+    transform = transforms.Compose([
+        transforms.Resize(SIZE),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ])
+
+    # 创建数据集
     dataset = NEFtoJPGDataset(mapping, transform=transform)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    print(f"[主函数] 创建数据加载器, 批次大小={batch_size}, 数据长度={len(dataset)}")
 
-    gen = UNetGenerator().to(device)
-    disc = Discriminator().to(device)
-    print(f"[主函数] 模型已移动到 {device}")
+    # 初始化模型
+    gen = SimpleGenerator().to(device)
+    disc = SimpleDiscriminator().to(device)
 
     # 打印模型信息
-    print(f"[主函数] 生成器参数数量: {sum(p.numel() for p in gen.parameters()):,}")
-    print(f"[主函数] 判别器参数数量: {sum(p.numel() for p in disc.parameters()):,}")
+    gen_params = sum(p.numel() for p in gen.parameters())
+    disc_params = sum(p.numel() for p in disc.parameters())
+    print(f"\n生成器参数数量: {gen_params:,}")
+    print(f"判别器参数数量: {disc_params:,}")
 
+    # 优化器和损失函数
     g_opt = optim.Adam(gen.parameters(), lr=lr, betas=(0.5, 0.999))
     d_opt = optim.Adam(disc.parameters(), lr=lr, betas=(0.5, 0.999))
     criterion = nn.BCEWithLogitsLoss()
-    print(f"[主函数] 优化器和损失函数已初始化")
 
-    # 创建目录
-    os.makedirs("results", exist_ok=True)
+    # 创建模型目录
     os.makedirs("models", exist_ok=True)
-    print(f"[主函数] 输出目录已创建")
 
-    print(f"[主函数] 开始训练...")
+    print(f"\n开始训练，共 {epochs} 个epochs，批次大小 {batch_size}...")
+
+    # 开始训练
     train(dataloader, gen, disc, g_opt, d_opt, criterion, device, epochs)
-    print(f"[主函数] 训练完成!")
+
+    print("\n训练完成! 模型和示例图像已保存")
 
 
 if __name__ == "__main__":
-    print("===== 程序开始 =====")
+    # 设置随机种子
+    torch.manual_seed(42)
+    np.random.seed(42)
+
     main()
-    print("===== 程序结束 =====")
